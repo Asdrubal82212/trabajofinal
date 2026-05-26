@@ -1,12 +1,9 @@
 version: 0.2
 
 phases:
-  install:
-    runtime-versions:
-      python: 3.12
   build:
     commands:
-      - echo "Empaquetando el código para el pipeline..."
+      - echo "Empaquetando el código en un archivo zip..."
       - zip -r deployment_package.zip lambda_function.py
 artifacts:
   files:
