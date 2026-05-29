@@ -1,0 +1,188 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Pipeline de 4 etapas para procesamiento de imágenes con Rekognition'
+
+Parameters:
+  GitHubRepo:
+    Type: String
+    Default: 'tu-usuario-github/trabajofinal'
+  GitHubBranch:
+    Type: String
+    Default: 'main'
+  ConnectionArn:
+    Type: String
+    Description: 'ARN de la conexión de AWS con GitHub (CodeStar Connection)'
+
+Resources:
+  # 1. El Bucket de S3 para los artefactos del Pipeline
+  ArtifactBucket:
+    Type: AWS::S3::Bucket
+
+  # 2. El Rol de IAM para la función Lambda
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: [lambda.amazonaws.com]
+            Action: ['sts:AssumeRole']
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
+        - arn:aws:iam::aws:policy/AmazonRekognitionReadOnlyAccess
+
+  # 3. La Función Lambda (inicialmente con código base)
+  MyLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: lambda-trabajo-final
+      Handler: lambda_function.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Runtime: python3.12
+      Code:
+        ZipFile: |
+          def lambda_handler(event, context):
+              return {"statusCode": 200, "body": "Inicializado"}
+
+  # 4. El Rol para CodeBuild
+  CodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: [codebuild.amazonaws.com]
+            Action: ['sts:AssumeRole']
+      Policies:
+        - PolicyName: CodeBuildAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ['s3:*', 'logs:*']
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                - lambda:UpdateFunctionCode
+                Resource: "*"
+
+  # 5. Proyecto de CodeBuild (Etapa de Construcción)
+  BuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: BuildImageProcessor
+      ServiceRole: !GetAtt CodeBuildRole.Arn
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:7.0
+      Source:
+        Type: CODEPIPELINE
+
+  # 6. Proyecto de CodeBuild para el Despliegue (Etapa 4)
+  # Usamos CodeBuild para desplegar porque la acción nativa de Lambda en CodePipeline
+  # está diseñada para invocar funciones, no para actualizar su código fuente directamente.
+  DeployProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: DeployLambdaProcessor
+      ServiceRole: !GetAtt CodeBuildRole.Arn
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:7.0
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: |
+          version: 0.2
+          phases:
+            build:
+              commands:
+                - aws lambda update-function-code --function-name MiLambdaDeRekognition --zip-file fileb://deployment_package.zip
+
+  # 7. El Rol para el Pipeline
+  PipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: [codepipeline.amazonaws.com]
+            Action: ['sts:AssumeRole']
+      Policies:
+        - PolicyName: PipelineAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ['s3:*', 'codebuild:*', 'codestar-connections:UseConnection', 'iam:PassRole']
+                Resource: '*'
+
+  # 8. El Pipeline de 4 Etapas
+  ImagePipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: trabajo-final 
+      RoleArn: !GetAtt PipelineRole.Arn
+      ArtifactStore:
+        Type: S3
+        Location: !Ref ArtifactBucket
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: GitHubSource
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: CodeStarSourceConnection
+                Version: '1'
+              Configuration:
+                ConnectionArn: !Ref ConnectionArn
+                FullRepositoryId: !Ref GitHubRepo
+                BranchName: !Ref GitHubBranch
+              OutputArtifacts:
+                - Name: SourceArtifact
+        - Name: Build
+          Actions:
+            - Name: RunBuild
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              Configuration:
+                ProjectName: !Ref BuildProject
+              InputArtifacts:
+                - Name: SourceArtifact
+              OutputArtifacts:
+                - Name: BuildArtifact
+        - Name: Approval
+          Actions:
+            - Name: ManualApproval
+              ActionTypeId:
+                Category: Approval
+                Owner: AWS
+                Provider: Manual
+                Version: '1'
+        - Name: Deploy
+          Actions:
+            - Name: RunDeploy
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              Configuration:
+                ProjectName: !Ref DeployProject
+              InputArtifacts:
+                - Name: BuildArtifact
