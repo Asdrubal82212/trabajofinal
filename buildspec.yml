@@ -3,8 +3,5 @@ version: 0.2
 phases:
   build:
     commands:
-      - echo "Empaquetando el código en un archivo zip..."
       - zip -r deployment_package.zip lambda_function.py
-artifacts:
-  files:
-    - deployment_package.zip
+      - aws lambda update-function-code --function-name lambda-trabajo-final --zip-file fileb://deployment_package.zip
